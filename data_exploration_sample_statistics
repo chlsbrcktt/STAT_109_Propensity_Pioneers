@@ -1,0 +1,91 @@
+library(corrplot)
+library(dplyr)
+library(tidyr)
+library(car)
+
+data_train_original <- read.csv("customer_propensity_training_sample.csv")
+data_test_original <- read.csv("customer_propensity_testing_sample.csv")
+
+data_all <- rbind(data_train_original,data_test_original)
+
+#### Check Correlation to 'Ordered'
+# Remove UserID for now, to create table of just independent + dependent variable
+data_all_clean <- subset(data_all, select = -UserID)
+table(data_all_clean$ordered)
+
+# Proportions of 1's in predictors
+prop.table(table(data_all_clean$ordered)) # Check proportion balance of ordered 
+binary_props <- colMeans(data_all_clean[, -which(names(data_all_clean) == "ordered")])
+sort(binary_props, decreasing = TRUE)
+
+# Correlation between each variable and 'ordered'
+cor_with_ordered <- sapply(data_all_clean[, -which(names(data_all_clean) == "ordered")],
+                           function(x) cor(x, data_all_clean$ordered, method = "pearson"))
+
+# Sort by correlation
+cor_sorted <- sort(abs(cor_with_ordered), decreasing = TRUE)
+cor_sorted
+
+# Full correlation matrix (excluding UserID)
+cor_matrix <- cor(data_all_clean)
+
+# Plot correlation
+corrplot(cor_matrix, method = "color", type = "lower", tl.cex = 0.7, tl.col = "black")
+
+# Confidence intervals for top predictors
+top_predictors <- names(head(cor_sorted, 3))
+
+ci_summary <- data_all_clean %>%
+  pivot_longer(cols = all_of(top_predictors), names_to = "variable", values_to = "value") %>%
+  group_by(variable, ordered) %>%
+  summarise(mean = mean(value),
+            sd = sd(value),
+            n = n(),
+            se = sd / sqrt(n),
+            lower = mean - 1.96 * se,
+            upper = mean + 1.96 * se,
+            .groups = 'drop')
+
+ci_summary
+
+#### Chi-squared
+# This identifies variables that are statistically associated with the response variable.
+chi_sq_results <- sapply(names(data_all_clean)[-which(names(data_all_clean) == "ordered")], function(var) {
+  tbl <- table(data_all_clean[[var]], data_all_clean$ordered)
+  test <- chisq.test(tbl)
+  test$p.value
+})
+
+# Sort variables by strength of association
+chi_sq_sorted <- sort(chi_sq_results)
+chi_sq_sorted
+
+sig_vars <- names(chi_sq_sorted[chi_sq_sorted < 0.05])
+sig_vars
+
+set.seed(123)
+ind <- sample(2, nrow(data_all), replace = T, prob = c(0.7, 0.3))
+data_train <- data_all[ind == 1,]
+data_test <- data_all[ind == 2,]
+
+# Logistic regression model
+formula_str <- paste("ordered ~", paste(sig_vars, collapse = " + "))
+
+# Fit model
+model_logit <- glm(as.formula(formula_str), data = data_train, family = "binomial")
+
+summary(model_logit)
+
+# Check for multicollinearity
+vif(model_logit)
+
+# Predict on test data
+prob_test <- predict(model_logit, newdata = data_test, type = "response")
+pred_test <- ifelse(prob_test > 0.5, 1, 0)
+
+# Confusion Matrix
+table(Predicted = pred_test, Actual = data_test$ordered)
+
+# Accuracy
+mean(pred_test == data_test$ordered)
+
